@@ -22,9 +22,9 @@ jobs:
         uses: mamba-org/setup-micromamba@d05808540d968a55ca33c798e0661fb98f533c73
         with:
           micromamba-version: 1.5.10-0
-          cache-env: true
+          cache-downloads: true
           environment-file: environment.yml
-          extra-specs: |
+          create-args: >-
             python=${{ matrix.PYTHON_VERSION }}
       - name: Install repository
         run: python -m pip install --no-build-isolation --no-deps --disable-pip-version-check -e .
