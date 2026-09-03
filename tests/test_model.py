@@ -73,15 +73,32 @@ def test_alpha_cvar_one_equals_anchor_regression(gamma, fit_intercept):
 @pytest.mark.parametrize("gamma", [1, 2, 5])
 @pytest.mark.parametrize("n_environments", [8, 25])
 def test_alpha_cvar_one_equals_anchor_regression_discrete(gamma, n_environments):
-    """As above, but the anchor is discrete and passed to ``ivmodels`` as one-hot."""
+    """As above, but the anchor is discrete."""
     environment, X, y = simulate(n_environments=n_environments)
     one_hot = np.eye(n_environments)[environment]
 
-    anchor = AnchorRegression(gamma=gamma).fit(X, y, one_hot)
+    # min_b ||y - Xb||^2 + (gamma - 1) ||P_Z (y - Xb)||^2, with the intercept folded
+    # into both designs, exactly as the estimator does.
+    intercept = np.ones((len(y), 1))
+    design = np.hstack([intercept, X])
+    anchor = np.hstack([intercept, one_hot])
+    # pinv, as one-hot columns plus an intercept are rank-deficient by construction.
+    projection = anchor @ np.linalg.pinv(anchor)
+    exact = np.linalg.solve(
+        design.T @ design + (gamma - 1) * design.T @ projection @ design,
+        design.T @ y + (gamma - 1) * design.T @ projection @ y,
+    )
+
     cvar = CVaRAnchorRegression(gamma=gamma, alpha_cvar=1.0).fit(X, y, environment)
 
-    np.testing.assert_allclose(cvar.coef_, anchor.coef_, rtol=1e-2, atol=1e-3)
-    np.testing.assert_allclose(cvar.intercept_, anchor.intercept_, rtol=1e-2, atol=1e-3)
+    np.testing.assert_allclose(cvar.coef_, exact[1:], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(cvar.intercept_, exact[0], rtol=1e-5, atol=1e-6)
+
+    reference = AnchorRegression(gamma=gamma).fit(X, y, one_hot)
+    np.testing.assert_allclose(cvar.coef_, reference.coef_, rtol=5e-2, atol=5e-3)
+    np.testing.assert_allclose(
+        cvar.intercept_, reference.intercept_, rtol=5e-2, atol=5e-3
+    )
 
 
 DISCRETE_CASES = [
@@ -115,14 +132,17 @@ def test_discrete_anchor_equals_one_hot(n_environments, gamma, alpha_cvar):
 
     # The objective above is the claim under test. The coefficients are a weaker
     # check: the objective is flat near the optimum, so the two paths stop at
-    # slightly different points on that flat.
-    np.testing.assert_allclose(discrete.coef_, encoded.coef_, rtol=1e-4, atol=1e-5)
+    # slightly different points on that flat, and how far apart they stop is a
+    # property of the BLAS rather than of the estimator. These tolerances are set to
+    # catch a genuine divergence between the two code paths, which would be O(1), and
+    # not to pin down where L-BFGS-B halted.
+    np.testing.assert_allclose(discrete.coef_, encoded.coef_, rtol=1e-3, atol=1e-4)
     np.testing.assert_allclose(
-        discrete.intercept_, encoded.intercept_, rtol=1e-4, atol=1e-5
+        discrete.intercept_, encoded.intercept_, rtol=1e-3, atol=1e-4
     )
     # t_ needs the absolute tolerance: at alpha_cvar=1 it is zero, where a relative
     # comparison carries no meaning.
-    np.testing.assert_allclose(discrete.t_, encoded.t_, rtol=1e-4, atol=1e-5)
+    np.testing.assert_allclose(discrete.t_, encoded.t_, rtol=1e-3, atol=1e-4)
 
 
 def test_non_contiguous_level_codes():
