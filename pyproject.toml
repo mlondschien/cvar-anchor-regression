@@ -1,0 +1,36 @@
+[build-system]
+requires = ['setuptools', 'setuptools-scm', 'wheel']
+
+[project]
+name = "cvar_anchor_regression"
+description = "CVaR Anchor Regression"
+readme = "README.md"
+version = "0.1.0"
+requires-python = ">=3.12"
+authors = [
+    { name = "Malte Londschien", email = "malte@londschien.ch" },
+]
+urls = {homepage = "https://github.com/mlondschien/cvar-anchor-regression/"}
+classifiers = [
+    "License :: OSI Approved :: BSD License",
+    "Programming Language :: Python"
+]
+dependencies = [
+    "numpy", "scikit-learn", "scipy",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.isort]
+multi_line_output = 3
+include_trailing_comma = true
+ensure_newline_before_comments = true
+line_length = 88
+known_first_party = "cvar_anchor_regression"
+skip_glob = '\.eggs/*,\.git/*,\.venv/*,build/*,dist/*'
+default_section = 'THIRDPARTY'
+
+[tool.poetry.dependencies]
+sphinx = {version = "^3", optional = true}
+sphinx-autodoc-typehints ={version = "^1.11.1", optional = true}

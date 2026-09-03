@@ -1,0 +1,12 @@
+name: cvar-anchor-regression
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python>=3.12
+  - numpy
+  - scipy
+  - scikit-learn
+  - pytest  # tests only
+  - pytest-cov  # tests only
+  - ivmodels  # tests only
