@@ -1,8 +1,9 @@
 import numpy as np
 import pytest
+import scipy.optimize
 from ivmodels.models.anchor_regression import AnchorRegression
 
-from cvar_anchor_regression import CVaRAnchorRegression
+from cvar_anchor_regression import CVaRAnchorRegression, GroupDRO
 
 
 def simulate(n=400, mx=4, k=3, n_environments=None, seed=0):
@@ -50,7 +51,10 @@ def objective(X, y, environment, model, gamma, alpha_cvar):
     tail = weights[order[:last]] @ means[order[:last]] ** 2
     tail += boundary * means[order[last]] ** 2
 
-    return residuals @ residuals / len(y) + (gamma - 1) / alpha_cvar * tail
+    # ||M_Z r||^2 / n is the mean squared error less the mean of the squared means.
+    return (
+        residuals @ residuals / len(y) - weights @ means**2 + gamma / alpha_cvar * tail
+    )
 
 
 @pytest.mark.parametrize("fit_intercept", [True, False])
@@ -156,3 +160,67 @@ def test_non_contiguous_level_codes():
 
     np.testing.assert_allclose(contiguous.coef_, relabelled.coef_)
     np.testing.assert_allclose(contiguous.intercept_, relabelled.intercept_)
+
+
+GAMMA_ALPHA_CASES = [(1, 0.5), (2, 0.1), (3, 0.3), (5, 0.5)]
+
+
+@pytest.mark.parametrize("gamma, alpha_cvar", GAMMA_ALPHA_CASES)
+def test_minimizes_its_objective(gamma, alpha_cvar):
+    """The fit reaches the minimum of the exact, unsmoothed objective."""
+    environment, X, y = simulate(n_environments=8)
+
+    model = CVaRAnchorRegression(gamma=gamma, alpha_cvar=alpha_cvar).fit(
+        X, y, environment
+    )
+
+    class _At:  # a stand-in model, to score a coefficient vector with ``objective``
+        def __init__(self, b):
+            self.b = b
+
+        def predict(self, X):
+            return np.column_stack([np.ones(len(X)), X]) @ self.b
+
+    def score(b):
+        return objective(X, y, environment, _At(b), gamma, alpha_cvar)
+
+    start = np.r_[model.intercept_, model.coef_]
+    exact = scipy.optimize.minimize(
+        score,
+        start,
+        method="Nelder-Mead",
+        options={"xatol": 1e-9, "fatol": 1e-13, "maxiter": 20000},
+    ).x
+
+    np.testing.assert_allclose(score(start), score(exact), rtol=1e-5)
+
+
+def test_equals_group_dro_under_homoscedasticity():
+    """At ``gamma=1`` this is the CVaR of the group risks when the noise is equal.
+
+    The two agree only as the within-environment variances stop differing across
+    environments, which they do at rate ``1/sqrt(n_e)``, so this needs a larger sample
+    than the other tests and a tolerance that would still catch an O(1) divergence.
+    """
+    environment, X, y = simulate(n=20000, n_environments=8)
+    alpha_cvar = 0.5
+
+    anchor = CVaRAnchorRegression(gamma=1, alpha_cvar=alpha_cvar).fit(X, y, environment)
+    group_dro = GroupDRO(alpha_cvar=alpha_cvar).fit(X, y, environment)
+
+    np.testing.assert_allclose(anchor.coef_, group_dro.coef_, atol=0.1)
+    np.testing.assert_allclose(anchor.intercept_, group_dro.intercept_, atol=0.1)
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"gamma": -1}, "gamma must be non-negative"),
+        ({"alpha_cvar": 1.5}, r"alpha_cvar must be in \(0, 1\]"),
+        ({"alpha_cvar": 0.0}, r"alpha_cvar must be in \(0, 1\]"),
+    ],
+)
+def test_raises(kwargs, message):
+    environment, X, y = simulate(n_environments=8)
+    with pytest.raises(ValueError, match=message):
+        CVaRAnchorRegression(**kwargs).fit(X, y, environment)

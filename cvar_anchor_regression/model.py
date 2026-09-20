@@ -11,15 +11,22 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
     Linear regression with a CVaR anchor penalty.
 
     .. math:: \\hat\\beta(\\gamma, \\alpha) := \\arg\\min_\\beta \\
-       \\frac{1}{n} \\| y - X \\beta \\|_2^2
-       + (\\gamma - 1) \\ \\mathrm{CVaR}_\\alpha\\big( (P_Z (y - X \\beta))^2 \\big)
+       \\frac{1}{n} \\| M_Z (y - X \\beta) \\|_2^2
+       + \\gamma \\ \\mathrm{CVaR}_\\alpha\\big( (P_Z (y - X \\beta))^2 \\big)
        + \\alpha_\\textrm{ridge} \\|\\beta\\|_2^2
 
-    where :math:`P_Z` is the linear projection onto the span of :math:`Z` and
-    :math:`\\mathrm{CVaR}_\\alpha(W)` is the mean of the worst :math:`\\alpha` fraction
-    of :math:`W`. ``alpha=1`` is anchor regression, ``gamma=1`` is ordinary least squares.
+    where :math:`P_Z` is the linear projection onto the span of :math:`Z`,
+    :math:`M_Z := I - P_Z`, and :math:`\\mathrm{CVaR}_\\alpha(W)` is the mean of the
+    worst :math:`\\alpha` fraction of :math:`W`. ``alpha_cvar=1`` is anchor regression,
+    ``alpha_cvar=1`` with ``gamma=1`` is ordinary least squares.
 
-    With :math:`s := (\\gamma - 1)/\\alpha` and :math:`W := (P_Z (y - X \\beta))^2` the
+    For a discrete anchor this is
+    :math:`\\sum_e w_e \\sigma_e^2(\\beta) + \\gamma \\mathrm{CVaR}_\\alpha(\\mu_e^2(\\beta))`
+    over environments :math:`e` of relative size :math:`w_e`: only the squared group
+    mean residuals are reweighted, not the group variances. At ``gamma=1`` this is
+    :class:`~cvar_anchor_regression.GroupDRO` if the noise is homoscedastic.
+
+    With :math:`s := \\gamma/\\alpha` and :math:`W := (P_Z (y - X \\beta))^2` the
     anchor penalty is
 
     .. math:: s \\min_t \\{\\alpha t + \\mathbb{E}[(W - t)_+]\\}
@@ -31,14 +38,14 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
     Parameters
     ----------
     gamma: float, optional, default=1
-        The anchor regularization parameter. Must be at least 1.
+        The anchor regularization parameter. Must be non-negative.
     alpha_cvar: float, optional, default=1
         The CVaR level, in :math:`(0, 1]`: the fraction of the anchor distribution the
         penalty is computed over.
     fit_intercept: bool, optional, default=True
         Whether to fit an intercept. It is added as a column of ones to both ``X`` and
         ``Z``.
-    n_tau: int, optional, default=4
+    n_tau: int, optional, default=8
         The number of smoothing parameters in the annealing schedule. Must be at least
         two.
     tau_min: float, optional, default=1e-9
@@ -61,7 +68,7 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
         The fitted Rockafellar-Uryasev threshold, an estimate of the
         :math:`(1 - \\alpha)`-quantile of :math:`(P_Z(y - X\\hat\\beta))^2`.
     s_: float
-        The scaled penalty strength :math:`(\\gamma - 1)/\\alpha`.
+        The scaled penalty strength :math:`\\gamma/\\alpha`.
     n_features_in_: int
         The number of features seen during ``fit``.
 
@@ -78,12 +85,11 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
         gamma=1,
         alpha_cvar=1,
         fit_intercept=True,
-        n_tau=4,
+        n_tau=8,
         tau_min=1e-9,
         alpha_ridge=0.0,
         ftol=1e-12,
         gtol=1e-8,
-        tol=1e-2,
     ):
         self.gamma = gamma
         self.alpha_cvar = alpha_cvar
@@ -93,7 +99,6 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
         self.alpha_ridge = alpha_ridge
         self.ftol = ftol
         self.gtol = gtol
-        self.tol = tol
 
     def _projected_residuals(self, coef, y_proj, X_proj, Q):
         residual_means = y_proj - X_proj @ coef
@@ -110,10 +115,11 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
             coef @ gram_coef
             - 2 * coef @ Xty
             + y_moment
+            - weights @ values**2
             + self.s_ * (self.alpha_cvar * t + tau * (weights @ np.logaddexp(0.0, u)))
         )
-        penalty = weights * above * values
-        gradient = 2 * (gram_coef - Xty) - 2 * self.s_ * (
+        penalty = weights * (self.s_ * above - 1.0) * values
+        gradient = 2 * (gram_coef - Xty) - 2 * (
             X_proj.T @ (penalty if Q is None else Q.T @ penalty)
         )
         return value, np.append(gradient, self.s_ * (self.alpha_cvar - weights @ above))
@@ -137,8 +143,8 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
         """
         if not 0 < self.alpha_cvar <= 1:
             raise ValueError(f"alpha_cvar must be in (0, 1]. Got {self.alpha_cvar}.")
-        if self.gamma < 1:
-            raise ValueError(f"gamma must be at least 1. Got {self.gamma}.")
+        if self.gamma < 0:
+            raise ValueError(f"gamma must be non-negative. Got {self.gamma}.")
 
         X, y, Z = np.asarray(X, dtype=float), np.asarray(y, dtype=float), np.asarray(Z)
         if len(X) != len(y) or len(Z) != len(y):
@@ -157,7 +163,7 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
 
         n_samples = len(y)
         self.n_features_in_ = X.shape[1]
-        self.s_ = (self.gamma - 1) / self.alpha_cvar
+        self.s_ = self.gamma / self.alpha_cvar
 
         X_scale, y_scale = X.std(axis=0), y.std()
         X_scale[X_scale == 0.0] = 1.0
@@ -210,27 +216,38 @@ class CVaRAnchorRegression(RegressorMixin, BaseEstimator):
                 f"{Z.shape} and dtype {Z.dtype}."
             )
 
-        # Warm start with the least-squares solution, computed above.
-        parameters = np.append(coef, 0)
-        # The threshold is bounded below by zero as the atoms enter squared.
-        bounds = [(None, None)] * n_features + [(0.0, None)]
-        for tau in np.geomspace(1.0, self.tau_min, self.n_tau):
-            result = scipy.optimize.minimize(
-                self._loss,
-                parameters,
-                args=(tau, XtX, Xty, y_moment, y_proj, X_proj, Q, weights),
-                jac=True,
-                method="L-BFGS-B",
-                bounds=bounds,
-                options={"ftol": self.ftol, "gtol": self.gtol},
+        if self.alpha_cvar == 1:
+            scaled = X_proj.T * (weights if Q is None else 1.0 / n_samples)
+            parameters = np.append(
+                np.linalg.solve(
+                    XtX + (self.gamma - 1) * scaled @ X_proj,
+                    Xty + (self.gamma - 1) * scaled @ y_proj,
+                ),
+                0.0,
             )
-            parameters = result.x
+        else:
+            # Warm start with the least-squares solution, computed above.
+            parameters = np.append(coef, 0)
+            # The threshold is bounded below by zero as the atoms enter squared.
+            bounds = [(None, None)] * n_features + [(0.0, None)]
+            for tau in np.geomspace(1.0, self.tau_min, self.n_tau):
+                result = scipy.optimize.minimize(
+                    self._loss,
+                    parameters,
+                    args=(tau, XtX, Xty, y_moment, y_proj, X_proj, Q, weights),
+                    jac=True,
+                    method="L-BFGS-B",
+                    bounds=bounds,
+                    options={"ftol": self.ftol, "gtol": self.gtol},
+                )
+                parameters = result.x
 
-        if not result.success:
-            warnings.warn(
-                f"The optimizer did not converge at tau={tau:.2g}: {result.message}",
-                ConvergenceWarning,
-            )
+            if not result.success:
+                warnings.warn(
+                    f"The optimizer did not converge at tau={tau:.2g}: "
+                    f"{result.message}",
+                    ConvergenceWarning,
+                )
 
         # Undo the normalisation of X and y. The threshold is in units of y squared.
         coef = parameters[:-1] * y_scale / X_scale
